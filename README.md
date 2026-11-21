@@ -11,6 +11,13 @@ Los indicadores se recogen solos: al arrancar, el programa pide al
 aparte, y lo guarda en `data/series/*.csv`. La primera descarga son unos 6 MB
 con todo el histórico desde septiembre de 2004; las siguientes, unas líneas.
 
+La señal se da para un **fondo real**: por omisión el iShares Euro Investment
+Grade Corporate Bond Index Fund (IE) Institutional Acc EUR (`IE00B67T5G21`).
+Sus valores liquidativos diarios se bajan de Finect en la misma actualización,
+como en `msmoney` y `fondos-openbank`, y se guardan en
+`data/series/fondo_<ISIN>.csv`; el backtest compra y vende ese fondo con su
+valor liquidativo desde el primero publicado (febrero de 2012).
+
 ## Compilar y ejecutar
 
 ```sh
@@ -22,17 +29,24 @@ ctest --test-dir build     # tests del motor, sin red ni ventana
 ```
 
 Hace falta SDL3 (por `pkg-config`), `curl` en el PATH y la fuente DejaVu Sans.
-`config.ini` (opcional) dice dónde va la carpeta de datos y si se actualiza al
-arrancar.
+`config.ini` (opcional) dice dónde va la carpeta de datos, si se actualiza al
+arrancar y qué fondo se sigue (`fondo = <ISIN>`, o `no` para quedarse solo con
+el bono AAA sintético). `./build/rf_probe data <ISIN>` hace lo mismo con otro
+fondo.
 
 ## Las pestañas (`1`-`6`, `F5` actualiza)
 
 - **Monitor** — el cuadro de control de hoy: los cinco indicadores con su
   estado (desfavorable 0, neutral 1, favorable 2), la lectura en palabras, la
-  puntuación sobre 10 y la decisión. Incluye el control semanal del 2 años y la
-  subida de tipos que anularía la prima.
-- **Histórico** — tipos, pendiente, expectativas, prima, tendencias y los dos
-  fondos sintéticos, con la puntuación diaria debajo.
+  puntuación sobre 10 y la decisión. Incluye el control semanal del 2 años, la
+  subida de tipos que anularía la prima, el fondo (valor liquidativo,
+  variación a 1 y 3 meses y a 1 y 3 años, rendimiento estimado) y **«si entras
+  hoy: qué pasó otras veces»**: el exceso medio del fondo sobre el monetario a
+  6, 12 y 24 meses, y cuántas veces ganó, en las revisiones pasadas con la
+  misma puntuación y con la misma decisión que hoy.
+- **Histórico** — tipos, pendiente, expectativas, prima, tendencias y los
+  fondos (el monetario, el fondo real y el bono AAA que mejor lo imita), con la
+  puntuación diaria debajo.
 - **Señal** — el backtest que pide el método: en cada revisión mensual (o
   semanal) se anota la puntuación y lo que hizo después la renta fija menos el
   monetario a 6, 12 y 24 meses. Tablas por puntuación, por estado de cada
@@ -44,8 +58,8 @@ arrancar.
 - **Umbrales** — la estrategia para cada pareja (puntuación de entrada,
   puntuación de salida), en un mapa de calor; un clic aplica la pareja. En el
   panel izquierdo se editan los umbrales de cada indicador.
-- **Datos** — estado de las once series y el cuaderno de observaciones,
-  exportable a CSV (`data/observaciones.csv`).
+- **Datos** — estado de las once series del BCE y de los VL del fondo, y el
+  cuaderno de observaciones, exportable a CSV (`data/observaciones.csv`).
 
 Todos los parámetros se guardan en `data/renta-fija.cfg` y todo se recalcula al
 cambiar cualquiera de ellos.
@@ -79,19 +93,38 @@ Dos cosas se apartan de la letra del método porque los datos no existen gratis:
 
 ## Los fondos del backtest
 
-No se usan valores liquidativos de fondos reales (no hay ninguno con historia
-limpia desde 2004), sino dos índices sintéticos:
+- **Monetario**: sintético, el €STR capitalizado a diario (act/360) menos
+  gastos. Antes de octubre de 2019, EONIA − 8,5 pb, el diferencial fijo de
+  conversión del BCE.
+- **Renta fija, fondo real** (por omisión): el valor liquidativo del fondo de
+  `config.ini`, ya neto de gastos, en los días con curva del BCE (un día sin VL
+  conserva el anterior). El backtest empieza con su primer VL y termina con el
+  último, así que con `IE00B67T5G21` cubre de 2012-02 en adelante.
+- **Renta fija, bono AAA sintético**: un bono cupón cero de la duración
+  indicada (2 años por omisión) renovado cada día sobre la curva AAA —cupón,
+  descenso por la curva y variación de precio—, más un diferencial opcional,
+  menos gastos. Cubre desde 2004.
 
-- **Monetario**: el €STR capitalizado a diario (act/360) menos gastos. Antes de
-  octubre de 2019, EONIA − 8,5 pb, el diferencial fijo de conversión del BCE.
-- **Renta fija**: un bono cupón cero de la duración indicada (2 años por
-  omisión) renovado cada día sobre la curva AAA —cupón, descenso por la curva y
-  variación de precio—, más un diferencial opcional, menos gastos.
+Se elige en el panel «Fondo de renta fija» de Señal, Estrategia o Umbrales.
 
-Para acercarlo a un fondo concreto (la «sexta métrica» del método), se pone su
-duración modificada, sus gastos y, como diferencial, la TIR de su cartera menos
-el tipo AAA al mismo plazo. Un fondo con crédito o deuda periférica rinde más
-y cae más en las crisis de lo que dice este modelo.
+Con el fondo real, la rentabilidad sale del VL, pero la prima (indicador 4) y
+el margen de seguridad necesitan una TIR que Finect no publica. Se estima como
+el tipo AAA a la duración del fondo más un diferencial, menos gastos. El botón
+«Ajustar al histórico del fondo» los calcula del propio VL:
+
+- **duración**: la del bono AAA cupón cero cuya variación de tipos explica las
+  rentabilidades semanales del fondo con una pendiente igual a esa misma
+  duración. `IE00B67T5G21` se mueve como un AAA a 4,25 años (R² 0,53: el resto
+  es el diferencial de crédito, que se mueve por su cuenta).
+- **diferencial**: lo que el fondo le ha sacado a ese bono AAA en todo su
+  histórico (+1,83 pp al año en `IE00B67T5G21`), más los gastos (0,15 %).
+
+Dos avisos: el diferencial no es constante (−2,4 pp en 2022, +3,3 pp al año en
+2012-14) y fijarlo con todo el histórico mira al futuro, así que el indicador 4
+del fondo real describe el fondo, no lo que se sabía en cada fecha. Y el método
+está pensado para un fondo a 2 años de deuda pública: un fondo de crédito a
+4 años cae más con las subidas de tipos y también cuando se amplían los
+diferenciales (marzo de 2020), algo que ninguno de los cinco indicadores mide.
 
 Las órdenes se ejecutan al día siguiente de la revisión: el BCE publica cada
 curva la mañana posterior, así que la señal no se habría podido operar el día
@@ -113,6 +146,7 @@ que lleva por fecha.
 model.h/.cpp    calendario, series en caché, tabla diaria de mercado
 engine.h/.cpp   indicadores, puntuación, fondos sintéticos y backtests (con tests)
 ecb.h/.cpp      descarga del portal de datos del BCE (por curl)
+finect.h/.cpp   valores liquidativos del fondo real, de Finect por ISIN
 updater.h/.cpp  actualización en segundo plano
 ui.h/.cpp       estado, paleta, gráfica y marco de la ventana
 tabs.cpp        las seis vistas

@@ -13,6 +13,8 @@ namespace {
 
 constexpr const char* kHost = "https://data-api.ecb.europa.eu/service/data";
 
+}  // namespace
+
 std::string runCommand(std::string cmd) {
 #ifdef _WIN32
     // popen goes through cmd.exe, which does not honour single quotes; the
@@ -28,6 +30,8 @@ std::string runCommand(std::string cmd) {
     while ((n = fread(buf.data(), 1, buf.size(), pipe.get())) > 0) out.append(buf.data(), n);
     return out;
 }
+
+namespace {
 
 std::vector<std::string> splitCsv(const std::string& line) {
     std::vector<std::string> cells;

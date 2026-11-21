@@ -73,6 +73,11 @@ std::string dataDir(const std::string& dataRoot);              // <root>/series/
 std::string seriesPath(const std::string& dataRoot, int id);
 void loadSeries(const std::string& dataRoot, SeriesSet& set);
 
+// the real fund's NAVs (same "YYYY-MM-DD,value" format) and its name, one line
+std::string fundNavPath(const std::string& dataRoot, const std::string& isin);
+std::string fundNamePath(const std::string& dataRoot, const std::string& isin);
+std::string loadFundName(const std::string& dataRoot, const std::string& isin);
+
 // ---- the aligned table ------------------------------------------------------
 // One row per day the ECB published its yield curve. Yields are the
 // continuously compounded spot rates of the euro-area AAA government curve, in

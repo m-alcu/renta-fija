@@ -3,23 +3,30 @@
 // backtest summary. Handy to check the ECB endpoints still answer the way the
 // app expects, and to read the numbers from a terminal or a cron job.
 //
-//   ./build/rf_probe            download everything, keep nothing
-//   ./build/rf_probe data/      use the app's cache instead of the network
+//   ./build/rf_probe                 download everything, keep nothing
+//   ./build/rf_probe data/           use the app's cache instead of the network
+//   ./build/rf_probe data/ <ISIN>    ... with another real fund (default
+//                                    IE00B67T5G21; "no" for the synthetic one)
 #include <cstdio>
 #include <string>
 
 #include "ecb.h"
 #include "engine.h"
+#include "finect.h"
 #include "model.h"
 
 int main(int argc, char** argv) {
     SeriesSet set;
     Params p;
+    std::string isin = argc > 2 ? argv[2] : kDefaultFundIsin;
+    if (isin == "no") isin.clear();
+    Series nav;
     if (argc > 1) {
         std::string root = argv[1];
         if (root.back() != '/') root += '/';
         loadSeries(root, set);
         p.load(root + "renta-fija.cfg");
+        if (!isin.empty()) nav.load(fundNavPath(root, isin));
     } else {
         for (int id = 0; id < S_COUNT; id++) {
             std::string err;
@@ -31,14 +38,33 @@ int main(int argc, char** argv) {
                         set[(size_t)id].days.size(), dateStr(set[(size_t)id].firstDay()).c_str(),
                         dateStr(set[(size_t)id].lastDay()).c_str());
         }
+        std::string err;
+        if (!isin.empty() && !finectFetchNav(isin, kNoDay, nav, &err)) {
+            std::printf("%-22s ERROR: %s\n", isin.c_str(), err.c_str());
+            return 1;
+        }
     }
+    if (!isin.empty())
+        std::printf("%-22s %5zu VL    %s .. %s\n", ("VL " + isin).c_str(), nav.days.size(),
+                    dateStr(nav.firstDay()).c_str(), dateStr(nav.lastDay()).c_str());
+    if (nav.empty()) p.fundSource = 0;
     Market mk = buildMarket(set);
     if (mk.empty()) {
         std::printf("sin datos\n");
         return 1;
     }
     std::vector<Indicators> ind = computeAll(mk, p);
-    Indices ix = buildIndices(mk, p);
+    Indices ix = buildIndices(mk, p, &nav);
+    if (ix.real) {
+        FundFit f = fitFund(mk, nav);
+        std::printf("\nFondo real %s: se mueve como un AAA a %.2f años (R2 %.2f); TAE %.2f %% "
+                    "frente a %.2f %% del bono AAA: %+.2f pp al año (%+.2f en los últimos 3)\n"
+                    "  prima calculada con duración %.2f, diferencial %.2f, gastos %.2f\n",
+                    isin.c_str(), f.duration, f.r2, f.fundCagr, f.zeroCagr, f.excess, f.excess3y,
+                    p.realDuration, p.realSpread, p.realTer);
+    } else {
+        std::printf("\nFondo sintético: bono AAA a %.2f años\n", p.duration);
+    }
     const Indicators& now = ind.back();
 
     std::printf("\nDatos a %s   3M %.2f  2A %.2f  10A %.2f  €STR %.3f\n",
@@ -60,8 +86,8 @@ int main(int argc, char** argv) {
     std::printf("  todo  %4d  %9.2f  %9.2f  %7.0f  %9.2f\n", st.all[1].n, st.all[0].mean,
                 st.all[1].mean, st.all[1].pctPos, st.all[2].mean);
 
-    std::printf("\nEstrategias (%s .. %s)\n", dateStr(mk.days.front()).c_str(),
-                dateStr(mk.days.back()).c_str());
+    std::printf("\nEstrategias (%s .. %s)\n", dateStr(mk.days[ix.first]).c_str(),
+                dateStr(mk.days[ix.last]).c_str());
     std::printf("  %-26s   TAE    caida max   vol   en RF  cambios\n", "");
     for (Strategy s : {Strategy::Signal, Strategy::AllMM, Strategy::AllBond, Strategy::Half}) {
         StratResult r = simulate(mk, ix, ind, p, s);

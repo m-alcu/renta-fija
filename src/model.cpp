@@ -196,6 +196,22 @@ void loadSeries(const std::string& dataRoot, SeriesSet& set) {
     for (int i = 0; i < S_COUNT; i++) set[(size_t)i].load(seriesPath(dataRoot, i));
 }
 
+std::string fundNavPath(const std::string& dataRoot, const std::string& isin) {
+    return dataDir(dataRoot) + "fondo_" + isin + ".csv";
+}
+
+std::string fundNamePath(const std::string& dataRoot, const std::string& isin) {
+    return dataDir(dataRoot) + "fondo_" + isin + ".txt";
+}
+
+std::string loadFundName(const std::string& dataRoot, const std::string& isin) {
+    std::ifstream f(fundNamePath(dataRoot, isin));
+    std::string name;
+    std::getline(f, name);
+    if (!name.empty() && name.back() == '\r') name.pop_back();
+    return name;
+}
+
 // ---- Market -----------------------------------------------------------------
 int Market::indexAsOf(int serial) const {
     auto it = std::upper_bound(days.begin(), days.end(), serial);

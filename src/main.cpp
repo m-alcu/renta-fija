@@ -11,12 +11,14 @@
 //                   (puro, con tests)
 //   ecb.h/.cpp      descarga de series del portal de datos del BCE
 //   updater.h/.cpp  la actualizacion en segundo plano
+//   finect.h/.cpp   valores liquidativos del fondo real (Finect)
 //   ui.h/.cpp       estado compartido, paleta, grafica y marco de la ventana
 //   tabs.cpp        las seis vistas
 //   main.cpp        SDL y el bucle de eventos
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +28,7 @@
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
+#include "finect.h"
 #include "model.h"
 #include "ui.h"
 
@@ -42,11 +45,14 @@ std::string trim(std::string s) {
 //
 //   data_root = ~/Documentos/renta-fija   ; carpeta de la cache y los parametros
 //   update_on_start = si                  ; no | si (por omision, si)
+//   fondo = IE00B67T5G21                  ; ISIN del fondo real (Finect); "no"
+//                                         ; para quedarse con el sintetico
 //
 // Lines starting with # or ; are comments; ~/ expands to $HOME.
 struct Config {
     std::string dataRoot = "data/";
     bool updateOnStart = true;
+    std::string fundIsin = kDefaultFundIsin;
 };
 
 // The program is as often started from build/ as from the project folder.
@@ -89,6 +95,12 @@ Config readConfig() {
             cfg.dataRoot = val;
         } else if (key == "update_on_start") {
             cfg.updateOnStart = !(val == "no" || val == "0" || val == "false");
+        } else if (key == "fondo") {
+            for (char& c : val) c = (char)toupper((unsigned char)c);
+            if (val == "NO" || val.empty()) cfg.fundIsin.clear();
+            else if (validIsin(val)) cfg.fundIsin = val;
+            else SDL_Log("config.ini: ISIN no valido '%s', se usa %s", val.c_str(),
+                         cfg.fundIsin.c_str());
         }
     }
     return cfg;
@@ -124,6 +136,7 @@ int main() {
     App a;
     a.dataRoot = cfg.dataRoot;
     a.updateOnStart = cfg.updateOnStart;
+    a.fundIsin = cfg.fundIsin;
     std::error_code ec;
     std::filesystem::create_directories(dataDir(a.dataRoot), ec);
     a.p.load(paramsPath(a));

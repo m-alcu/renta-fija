@@ -28,10 +28,19 @@ struct Params {
     double t10Fav = 10;       // <= : favourable
     double t10Unf = 25;       // >  : unfavourable
 
-    // the bond fund being modelled
+    // the bond fund: 0 a synthetic AAA zero, 1 the real fund's NAV (Finect)
+    int fundSource = 1;
+    // the synthetic one
     double duration = 2.0;    // years, constant-maturity zero coupon
     double fundSpread = 0.0;  // pp over the AAA curve (credit, peripherals)
     double fundTer = 0.20;    // % a year
+    // How the real fund is described to indicator 4 (premium) and the safety
+    // margin; its returns come from the NAV itself. The defaults are
+    // fitFund() on IE00B67T5G21 from 2012-02 to 2026-11: it moves like a
+    // 4,25-year AAA zero and beat it by 1,83 pp a year after costs.
+    double realDuration = 4.25;
+    double realSpread = 1.98; // pp over the AAA curve, before costs
+    double realTer = 0.15;    // % a year (already inside the NAV)
     double mmTer = 0.10;      // % a year, money-market fund
 
     // decision rule
@@ -50,6 +59,11 @@ struct Params {
     double switchCostBp = 0;  // cost of moving 100 % of the portfolio, in pb
     int startYear = 0;        // 0: from the first data
     int endYear = 0;          // 0: to the last data
+
+    // what the premium indicator uses for the bond fund, whichever it is
+    double fundDur() const { return fundSource ? realDuration : duration; }
+    double fundSpr() const { return fundSource ? realSpread : fundSpread; }
+    double fundCost() const { return fundSource ? realTer : fundTer; }
 
     std::string signature() const;          // changes when anything above does
     bool load(const std::string& path);
@@ -100,22 +114,47 @@ const char* indicatorShort(int k);
 // what the indicator's state means in words, e.g. "Baja 22 pb en 3 meses"
 std::string indicatorReading(const Indicators& in, int k);
 
-// ---- synthetic total-return indices -----------------------------------------
-// mm:   the overnight rate, act/360, less the fund's costs.
-// bond: a zero-coupon bond of `duration` years rolled every day along the AAA
-//       curve - carry, roll-down and price change - plus the fund's spread,
-//       less its costs.
-// Both start at 100 on the first day of the table.
+// ---- total-return indices ---------------------------------------------------
+// mm:    the overnight rate, act/360, less the fund's costs.
+// synth: a zero-coupon bond of fundDur() years rolled every day along the AAA
+//        curve - carry, roll-down and price change - plus fundSpr(), less
+//        fundCost().
+// bond:  the bond fund the backtests trade. With fundSource 1 and a NAV
+//        series, the real fund's NAV (carried over the days it is not
+//        published) and [first, last] is the stretch the NAV covers; else the
+//        synthetic one over the whole table.
+// mm and synth start at 100 on the first day of the table, bond on `first`.
 struct Indices {
-    std::vector<double> mm, bond;
+    std::vector<double> mm, bond, synth;
+    size_t first = 0, last = 0;
+    bool real = false;
 };
-Indices buildIndices(const Market& mk, const Params& p);
+Indices buildIndices(const Market& mk, const Params& p, const Series* nav = nullptr);
+
+// ---- the real fund against the AAA curve ------------------------------------
+// Which AAA zero the fund moves like, and by how much it beat it: the
+// duration is the one at which weekly NAV returns regress on that zero's yield
+// changes with a slope equal to itself; the excess is the fund's annual
+// return over the zero's (no spread, no costs), so it comes net of costs and
+// realSpread = excess + realTer.
+struct FundFit {
+    bool valid = false;
+    int from = kNoDay, to = kNoDay;
+    double duration = 0;     // years
+    double r2 = 0;           // of the weekly regression
+    double excess = 0;       // pp a year over the AAA zero, whole history
+    double excess3y = 0;     // ... over the last three years
+    double fundCagr = 0, zeroCagr = 0;
+};
+FundFit fitFund(const Market& mk, const Series& nav);
 
 // ---- review calendar --------------------------------------------------------
 // indices of the first market day of every month (or week) inside the period
-std::vector<size_t> reviewDays(const Market& mk, const Params& p);
-// [first, last] market index of the backtest period; false if it is empty
-bool periodRange(const Market& mk, const Params& p, size_t& first, size_t& last);
+std::vector<size_t> reviewDays(const Market& mk, const Indices& ix, const Params& p);
+// [first, last] market index of the backtest period - the years chosen,
+// inside what the bond index covers; false if it is empty
+bool periodRange(const Market& mk, const Indices& ix, const Params& p, size_t& first,
+                 size_t& last);
 
 // ---- signal study -----------------------------------------------------------
 constexpr int kHorizons = 3;

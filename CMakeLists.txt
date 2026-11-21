@@ -23,6 +23,7 @@ add_executable(rentafija
     src/model.cpp
     src/engine.cpp
     src/ecb.cpp
+    src/finect.cpp
     src/updater.cpp
     src/ui.cpp
     src/tabs.cpp
@@ -39,12 +40,14 @@ target_link_libraries(rentafija PRIVATE SDL3::SDL3 Threads::Threads)
 # The engine runs against synthetic curves with known answers; no SDL, no
 # ImGui and no network, so these run anywhere.
 enable_testing()
-add_executable(engine_tests tests/engine_tests.cpp src/engine.cpp src/model.cpp)
+add_executable(engine_tests tests/engine_tests.cpp src/engine.cpp src/model.cpp src/finect.cpp
+    src/ecb.cpp)
 target_include_directories(engine_tests PRIVATE src)
 add_test(NAME engine_tests COMMAND engine_tests)
 
 # Downloads the series from the ECB and prints today's scoreboard and the
 # backtest summary on the terminal: the app without the window. Needs the
 # network, so it is not part of `ctest`.
-add_executable(rf_probe tools/rf_probe.cpp src/ecb.cpp src/engine.cpp src/model.cpp)
+add_executable(rf_probe tools/rf_probe.cpp src/ecb.cpp src/finect.cpp src/engine.cpp
+    src/model.cpp)
 target_include_directories(rf_probe PRIVATE src)

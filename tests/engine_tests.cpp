@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "engine.h"
+#include "finect.h"
 #include "model.h"
 
 static int failures = 0;
@@ -29,6 +30,13 @@ static Market makeMarket(int days, Fn level, double steep = 0.0, double onSpread
         mk.on.push_back(lv + onSpread);
     }
     return mk;
+}
+
+// the method as explicacion.md states it: the synthetic AAA bond fund
+static Params method() {
+    Params p;
+    p.fundSource = 0;
+    return p;
 }
 
 static void testCalendar() {
@@ -66,7 +74,7 @@ static void testSpotInterpolation() {
 // Flat curve that never moves: both funds earn the same rate, every trend is
 // zero, and the score is the all-neutral-or-better one.
 static void testFlatCurve() {
-    Params p;
+    Params p = method();
     p.fundTer = p.mmTer = 0;
     Market mk = makeMarket(800, [](int) { return 3.0; });
     Indices ix = buildIndices(mk, p);
@@ -92,7 +100,7 @@ static void testFlatCurve() {
 // Yields rising 1 pb a day: everything is unfavourable and the bond fund loses
 // to the money market.
 static void testRisingRates() {
-    Params p;
+    Params p = method();
     Market mk = makeMarket(600, [](int t) { return 1.0 + 0.01 * t; });
     std::vector<Indicators> ind = computeAll(mk, p);
     const Indicators& in = ind[300];
@@ -114,7 +122,7 @@ static void testRisingRates() {
 
 // A one-off 100 pb jump costs a 2-year zero about 2 %.
 static void testDurationShock() {
-    Params p;
+    Params p = method();
     p.fundTer = 0;
     Market mk = makeMarket(10, [](int t) { return t < 5 ? 2.0 : 3.0; });
     Indices ix = buildIndices(mk, p);
@@ -124,7 +132,7 @@ static void testDurationShock() {
 
 // An upward-sloping curve prices rate rises and pays a premium.
 static void testSlopeAndForwards() {
-    Params p;
+    Params p = method();
     p.fundTer = p.mmTer = 0;
     Market mk = makeMarket(300, [](int) { return 2.0; }, 1.0);  // y(m) = 2 + m
     Indicators in = computeIndicators(mk, 200, p);
@@ -143,7 +151,7 @@ static void testConfirmation() {
     // fell 60 pb two months ago, then bounced 20 pb in the last month
     auto level = [](int t) { return t < 130 ? 4.0 : t < 170 ? 3.4 : 3.6; };
     Market mk = makeMarket(260, level);
-    Params p;
+    Params p = method();
     Indicators in = computeIndicators(mk, 190, p);
     NEAR(in.d2y3m, -40, 1e-6);
     NEAR(in.d2y1m, 20, 1e-6);
@@ -153,7 +161,7 @@ static void testConfirmation() {
 }
 
 static void testDecision() {
-    Params p;
+    Params p = method();
     CHECK(decide(8, p) == Decision::Full);
     CHECK(decide(7, p) == Decision::Partial);
     CHECK(decide(5, p) == Decision::Partial);
@@ -176,7 +184,7 @@ static void testDecision() {
 static void testStrategy() {
     auto level = [](int t) { return t < 700 ? 6.0 - 0.005 * t : 2.5 + 0.005 * (t - 700); };
     Market mk = makeMarket(1400, level);
-    Params p;
+    Params p = method();
     std::vector<Indicators> ind = computeAll(mk, p);
     Indices ix = buildIndices(mk, p);
     std::vector<Trade> trades;
@@ -237,7 +245,7 @@ static void testBucket() {
 }
 
 static void testParamsRoundTrip() {
-    Params p;
+    Params p = method();
     p.t2yFav = -22.5;
     p.fullScore = 7;
     p.confirm1m = false;
@@ -248,6 +256,89 @@ static void testParamsRoundTrip() {
     CHECK(q.signature() == p.signature());
     CHECK(Params().signature() != p.signature());
     std::remove("/tmp/rf_params_test.cfg");
+}
+
+static void testFinectParse() {
+    Series s;
+    std::string body =
+        "{\"code\":200,\"data\":[{\"datetime\":\"2012-02-10T00:00:00.000Z\",\"price\":10.01598},"
+        "{\"datetime\":\"2012-02-09T00:00:00.000Z\",\"price\":10},"
+        "{\"datetime\":\"2012-02-13T00:00:00.000Z\",\"price\":null},"
+        "{\"datetime\":\"2012-02-14T00:00:00.000Z\",\"price\":10.02}]}";
+    CHECK(finectParseTimeseries(body, s));
+    CHECK(s.days.size() == 3);                       // the null day is skipped
+    CHECK(s.days[0] == parseDate("2012-02-09"));     // and the order fixed
+    NEAR(s.vals[1], 10.01598, 1e-12);
+    std::string err;
+    CHECK(!finectParseTimeseries("{\"code\":404,\"message\":\"Not found\"}", s, &err));
+    CHECK(err == "Finect: Not found");
+    CHECK(validIsin("IE00B67T5G21"));
+    CHECK(!validIsin("IE00B67T5G2"));
+    CHECK(!validIsin("ie00B67T5G21"));
+    CHECK(!validIsin("IE00B67T5G2'"));
+}
+
+// A "real" fund whose NAV is exactly a 3-year AAA zero plus 1 pp a year,
+// starting a year into the table: the backtest has to start on its first NAV
+// and the fit has to find the duration and the spread back.
+static void testRealFund() {
+    // rates that wander, so the regression has something to fit
+    auto level = [](int t) { return 2.0 + 0.8 * std::sin(t / 90.0) + 0.3 * std::sin(t / 17.0); };
+    Market mk = makeMarket(2200, level, 0.2);
+    Params syn = method();
+    syn.duration = 3.0;
+    syn.fundSpread = 1.0;
+    syn.fundTer = 0;
+    Indices ref = buildIndices(mk, syn);
+    Series nav;
+    for (size_t i = 365; i < mk.size() - 30; i++) {
+        if (mk.days[i] % 7 == 3) continue;  // a day the fund does not publish
+        nav.days.push_back(mk.days[i]);
+        nav.vals.push_back(ref.bond[i] / 10.0);
+    }
+
+    Params p;  // fundSource = 1
+    Indices ix = buildIndices(mk, p, &nav);
+    CHECK(ix.real);
+    CHECK(ix.first == 365);
+    CHECK(mk.days[ix.last] == nav.lastDay());
+    NEAR(ix.bond[ix.first], 100.0, 1e-12);
+    NEAR(ix.bond[ix.last] / ix.bond[ix.first], nav.vals.back() / nav.vals.front(), 1e-12);
+    // a missing day carries the previous NAV
+    for (size_t i = ix.first + 1; i < ix.last; i++)
+        if (mk.days[i] % 7 == 3) {
+            NEAR(ix.bond[i], ix.bond[i - 1], 1e-12);
+            break;
+        }
+
+    std::vector<Indicators> ind = computeAll(mk, p);
+    StratResult bond = simulate(mk, ix, ind, p, Strategy::AllBond);
+    CHECK(bond.days.front() == nav.firstDay());
+    CHECK(bond.days.back() == nav.lastDay());
+    NEAR(bond.value.back() / 100.0, nav.vals.back() / nav.vals.front(), 1e-9);
+    SignalStudy st = studySignal(mk, ix, ind, p);
+    CHECK(!st.obs.empty() && st.obs.front().day >= nav.firstDay());
+    for (auto& o : st.obs)  // no horizon past the last NAV
+        for (int h = 0; h < kHorizons; h++)
+            if (std::isfinite(o.excess[h]))
+                CHECK(o.day + (int)std::lround(kHorizonMonths[h] * 30.4375) <= nav.lastDay());
+
+    // the premium follows the real fund's description
+    p.realDuration = 3.0;
+    p.realSpread = 1.0;
+    p.realTer = 0.25;
+    Indicators in = computeIndicators(mk, 1000, p);
+    NEAR(in.fundYield, mk.spot(1000, 3.0) + 1.0 - 0.25, 1e-12);
+
+    FundFit f = fitFund(mk, nav);
+    CHECK(f.valid);
+    NEAR(f.duration, 3.0, 0.26);
+    CHECK(f.r2 > 0.95);
+    NEAR(f.excess, 1.0, 0.15);
+
+    // no NAVs: back to the synthetic bond over the whole table
+    Indices none = buildIndices(mk, p, nullptr);
+    CHECK(!none.real && none.first == 0 && none.last == mk.size() - 1);
 }
 
 int main() {
@@ -263,6 +354,8 @@ int main() {
     testStrategy();
     testBucket();
     testParamsRoundTrip();
+    testFinectParse();
+    testRealFund();
     if (failures) {
         std::printf("%d comprobaciones fallidas\n", failures);
         return 1;

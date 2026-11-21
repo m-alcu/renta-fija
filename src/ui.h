@@ -45,10 +45,19 @@ struct App {
     SeriesSet series;
     Market mk;
 
+    // the real fund (config.ini "fondo"): its NAVs from Finect
+    std::string fundIsin;
+    std::string fundName;             // "" until Finect has been asked
+    Series fundNav;
+
     // Everything below is derived from (series, p) and rebuilt as a whole
     // whenever the parameters' signature changes: it takes a few milliseconds
     // and no widget has to remember to invalidate anything.
     std::string sig;
+    // the parameters actually computed with: a.p, but on the synthetic fund
+    // while there are no NAVs to trade
+    Params eff;
+    FundFit fit;
     std::vector<Indicators> ind;
     Indices ix;
     SignalStudy study;
@@ -74,6 +83,11 @@ struct App {
 };
 
 std::string paramsPath(const App& a);
+// "iShares Euro Investment Grade..." or the ISIN; the synthetic bond's label
+// when the backtest is not on the real fund
+std::string fundLabel(const App& a);
+// what an UpdateOutcome refers to, for messages
+std::string outcomeLabel(const App& a, int id);
 // reads the cached series from disk and rebuilds the market table
 void reloadData(App& a);
 // recomputes the derived results if the parameters or the data changed

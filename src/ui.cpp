@@ -337,26 +337,47 @@ void drawChart(const char* id, ImVec2 size, const std::vector<ChartSeries>& seri
 
 std::string paramsPath(const App& a) { return a.dataRoot + "renta-fija.cfg"; }
 
+std::string fundLabel(const App& a) {
+    if (!a.ix.real) return "bono AAA sintético a " + fmtNum(a.eff.duration, 2) + " años";
+    return a.fundName.empty() ? a.fundIsin : a.fundName;
+}
+
+std::string outcomeLabel(const App& a, int id) {
+    if (id == kFundOutcome) return "VL de " + a.fundIsin + " (Finect)";
+    return seriesInfo(id).label;
+}
+
 void reloadData(App& a) {
     loadSeries(a.dataRoot, a.series);
     a.mk = buildMarket(a.series);
+    a.fundNav = Series();
+    if (!a.fundIsin.empty()) {
+        a.fundNav.load(fundNavPath(a.dataRoot, a.fundIsin));
+        a.fundName = loadFundName(a.dataRoot, a.fundIsin);
+    }
     a.sig.clear();
 }
 
 void ensureComputed(App& a) {
     std::string sig = a.p.signature() + "#" + std::to_string(a.mk.size()) + "#" +
-                      (a.mk.empty() ? "" : std::to_string(a.mk.days.back()));
+                      (a.mk.empty() ? "" : std::to_string(a.mk.days.back())) + "#" +
+                      std::to_string(a.fundNav.days.size()) + "#" +
+                      std::to_string(a.fundNav.lastDay());
     if (sig == a.sig) return;
     bool first = a.sig.empty();
     a.sig = sig;
-    a.ind = computeAll(a.mk, a.p);
-    a.ix = buildIndices(a.mk, a.p);
-    a.study = studySignal(a.mk, a.ix, a.ind, a.p);
-    a.strat[0] = simulate(a.mk, a.ix, a.ind, a.p, Strategy::Signal, &a.trades);
-    a.strat[1] = simulate(a.mk, a.ix, a.ind, a.p, Strategy::AllMM);
-    a.strat[2] = simulate(a.mk, a.ix, a.ind, a.p, Strategy::AllBond);
-    a.strat[3] = simulate(a.mk, a.ix, a.ind, a.p, Strategy::Half);
-    a.grid = thresholdGrid(a.mk, a.ix, a.ind, a.p);
+    a.eff = a.p;
+    if (a.fundNav.empty()) a.eff.fundSource = 0;  // nothing real to trade yet
+    const Params& p = a.eff;
+    a.fit = fitFund(a.mk, a.fundNav);
+    a.ind = computeAll(a.mk, p);
+    a.ix = buildIndices(a.mk, p, &a.fundNav);
+    a.study = studySignal(a.mk, a.ix, a.ind, p);
+    a.strat[0] = simulate(a.mk, a.ix, a.ind, p, Strategy::Signal, &a.trades);
+    a.strat[1] = simulate(a.mk, a.ix, a.ind, p, Strategy::AllMM);
+    a.strat[2] = simulate(a.mk, a.ix, a.ind, p, Strategy::AllBond);
+    a.strat[3] = simulate(a.mk, a.ix, a.ind, p, Strategy::Half);
+    a.grid = thresholdGrid(a.mk, a.ix, a.ind, p);
     // a changed parameter is kept for the next run; a mere reload is not a
     // reason to touch the file
     if (!first) a.p.save(paramsPath(a));
@@ -364,7 +385,7 @@ void ensureComputed(App& a) {
 
 void startRefresh(App& a, bool full) {
     if (a.updater.busy()) return;
-    a.updater.start(a.dataRoot, full);
+    a.updater.start(a.dataRoot, full, a.fundIsin);
 }
 
 void applyUpdate(App& a, const std::vector<UpdateOutcome>& outcomes) {
@@ -378,20 +399,20 @@ void applyUpdate(App& a, const std::vector<UpdateOutcome>& outcomes) {
     std::string firstError;
     for (auto& o : outcomes) {
         if (!o.error.empty()) {
-            if (!failed++) firstError = std::string(seriesInfo(o.id).label) + ": " + o.error;
+            if (!failed++) firstError = outcomeLabel(a, o.id) + ": " + o.error;
         }
-        added = std::max(added, o.added);
+        if (o.id != kFundOutcome) added = std::max(added, o.added);
     }
     reloadData(a);
+    std::string fund = a.fundNav.empty() ? "" : "; VL del fondo a " + dateStr(a.fundNav.lastDay());
     if (failed) {
-        setStatus(a, "BCE: " + std::to_string(failed) + " series sin actualizar (" + firstError +
-                         ")", true);
+        setStatus(a, std::to_string(failed) + " series sin actualizar (" + firstError + ")", true);
     } else if (a.mk.empty()) {
         setStatus(a, "BCE: la descarga no dejó datos utilizables", true);
     } else {
         setStatus(a, (added ? "BCE: " + std::to_string(added) + " días nuevos; "
                             : std::string("BCE: sin novedades; ")) +
-                         "curva a " + dateStr(a.mk.days.back()));
+                         "curva a " + dateStr(a.mk.days.back()) + fund);
     }
 }
 
@@ -402,7 +423,7 @@ bool exportObservations(App& a, std::string* path) {
     // semicolons and decimal commas: what a Spanish spreadsheet opens as-is
     f << "fecha;estr;aaa_3m;aaa_2a;aaa_10a;pendiente_pb;var_2a_1m_pb;var_2a_3m_pb;"
          "var_pendiente_3m_pb;exp_6m_pb;exp_12m_pb;prima_pp;var_10a_3m_pb;"
-         "ind1;ind2;ind3;ind4;ind5;puntuacion;decision;"
+         "ind1;ind2;ind3;ind4;ind5;puntuacion;decision;vl_renta_fija;"
          "exceso_6m_pp;exceso_12m_pp;exceso_24m_pp\n";
     auto num = [](double v, int dec) { return std::isfinite(v) ? fmtNum(v, dec) : std::string(); };
     for (auto& o : a.study.obs) {
@@ -415,6 +436,8 @@ bool exportObservations(App& a, std::string* path) {
         for (int k = 0; k < 5; k++) f << in.st[k] << ';';
         f << in.score << ';'
           << (entryBlocked(in, a.p) ? "Prima insuficiente" : decisionName(decide(in, a.p)))
+          << ';'
+          << num(a.ix.real ? a.fundNav.asOf(o.day) : a.ix.bond[o.idx], 4)
           << ';' << num(o.excess[0], 3)
           << ';' << num(o.excess[1], 3) << ';' << num(o.excess[2], 3) << '\n';
     }
@@ -444,7 +467,8 @@ void drawUI(App& a) {
     ImGui::TextColored(C_GREEN, "renta fija");
     ImGui::PopFont();
     ImGui::SameLine();
-    ImGui::TextColored(C_DIM, "cuándo pasar del monetario al bono a 2 años");
+    ImGui::TextColored(C_DIM, "cuándo pasar del monetario a %s",
+                       a.ix.real ? fundLabel(a).c_str() : "renta fija a 2 años");
     ImGui::SameLine();
     {
         float w = 170.0f;
@@ -456,7 +480,7 @@ void drawUI(App& a) {
                          ImVec2(w, 0)))
             startRefresh(a);
         ImGui::EndDisabled();
-        Tooltip("Pide al BCE lo publicado desde el último día en caché (F5)");
+        Tooltip("Pide al BCE y a Finect lo publicado desde el último día en caché (F5)");
     }
 
     float statusH = ImGui::GetTextLineHeightWithSpacing() + 6;
@@ -497,15 +521,16 @@ void drawUI(App& a) {
     ImGui::Separator();
     if (a.updater.busy()) {
         std::string p = a.updater.progress();
-        ImGui::TextColored(C_YELLOW, "BCE: %s", p.empty() ? "conectando..." : p.c_str());
+        ImGui::TextColored(C_YELLOW, "%s", p.empty() ? "conectando..." : p.c_str());
     } else if (!a.status.empty() && SDL_GetTicks() - a.statusAt < (a.statusBad ? 20000u : 8000u)) {
         ImGui::TextColored(a.statusBad ? C_RED : C_GREEN, "%s", a.status.c_str());
     } else {
         ImGui::TextUnformatted(" ");
     }
     ImGui::SameLine();
-    std::string right = "1-7: pestañas  |  F5: actualizar";
+    std::string right = "1-6: pestañas  |  F5: actualizar";
     if (!a.mk.empty()) right += "  |  curva del BCE a " + dateStr(a.mk.days.back());
+    if (!a.fundNav.empty()) right += "  |  VL a " + dateStr(a.fundNav.lastDay());
     TextRight(right, C_DIM);
 
     ImGui::End();

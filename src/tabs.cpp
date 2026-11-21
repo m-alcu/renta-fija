@@ -171,7 +171,9 @@ void paramsPanel(App& a, int focus) {  // focus: 0 signal, 1 strategy, 2 thresho
     auto open = [&](bool wanted) { return wanted ? ImGuiTreeNodeFlags_DefaultOpen : 0; };
 
     if (ImGui::CollapsingHeader("Periodo y revisión", open(true))) {
-        int y0 = dateFromSerial(a.mk.days.front()).y, y1 = dateFromSerial(a.mk.days.back()).y;
+        // the years the bond index covers: from 2012 with the real fund
+        size_t i0 = std::min(a.ix.first, a.mk.size() - 1), i1 = std::min(a.ix.last, a.mk.size() - 1);
+        int y0 = dateFromSerial(a.mk.days[i0]).y, y1 = dateFromSerial(a.mk.days[i1]).y;
         int from = p.startYear ? std::clamp(p.startYear, y0, y1) : y0;
         int to = p.endYear ? std::clamp(p.endYear, y0, y1) : y1;
         ImGui::SetNextItemWidth(128);
@@ -214,18 +216,77 @@ void paramsPanel(App& a, int focus) {  // focus: 0 signal, 1 strategy, 2 thresho
         p.switchCostBp = std::clamp(p.switchCostBp, 0.0, 200.0);
     }
 
-    if (ImGui::CollapsingHeader("Fondos modelados", open(focus != 2))) {
-        numField("Duración (años)", &p.duration, 0.25, "%.2f",
-                 "Duración del fondo de renta fija. Se simula como un bono cupón cero de ese "
-                 "plazo renovado cada día sobre la curva AAA: cupón, descenso por la curva y "
-                 "variación de precio. Pon aquí la duración modificada de tu fondo.");
-        p.duration = std::clamp(p.duration, 0.5, 5.0);
-        numField("Diferencial (pp)", &p.fundSpread, 0.05, "%.2f",
-                 "Rentabilidad adicional del fondo sobre la curva AAA: crédito, periferia. "
-                 "TIR de la cartera del fondo menos el tipo AAA al mismo plazo.");
-        numField("Gastos RF (%)", &p.fundTer, 0.05, "%.2f");
+    if (ImGui::CollapsingHeader("Fondo de renta fija", open(focus != 2))) {
+        ImGui::BeginDisabled(a.fundIsin.empty());
+        ImGui::RadioButton("Fondo real", &p.fundSource, 1);
+        ImGui::EndDisabled();
+        Tooltip("El backtest compra y vende el fondo de config.ini con sus valores "
+                "liquidativos reales (Finect), desde el primero publicado.");
+        ImGui::SameLine();
+        ImGui::RadioButton("Bono AAA sintético", &p.fundSource, 0);
+        Tooltip("Un bono cupón cero de la duración indicada renovado cada día sobre la curva "
+                "AAA del BCE, desde 2004.");
+        ImGui::PushTextWrapPos(0);
+        if (p.fundSource == 1) {
+            if (a.fundIsin.empty())
+                ImGui::TextColored(C_ORANGE, "config.ini no tiene fondo («fondo = no»).");
+            else if (a.fundNav.empty())
+                ImGui::TextColored(C_ORANGE,
+                                   "Todavía no hay valores liquidativos de %s: mientras, se usa "
+                                   "el sintético. Pulsa «Actualizar datos».",
+                                   a.fundIsin.c_str());
+            else {
+                ImGui::TextUnformatted(a.fundName.empty() ? a.fundIsin.c_str() : a.fundName.c_str());
+                ImGui::TextColored(C_DIM, "%s · VL de %s a %s", a.fundIsin.c_str(),
+                                   dateStr(a.fundNav.firstDay()).c_str(),
+                                   dateStr(a.fundNav.lastDay()).c_str());
+            }
+            numField("Duración (años)", &p.realDuration, 0.25, "%.2f",
+                     "Solo para la prima (indicador 4) y el margen de seguridad: el rendimiento "
+                     "del fondo se estima como el tipo AAA a este plazo más el diferencial, "
+                     "menos gastos. La rentabilidad del backtest sale del valor liquidativo.");
+            p.realDuration = std::clamp(p.realDuration, 0.5, 10.0);
+            numField("Diferencial (pp)", &p.realSpread, 0.05, "%.2f",
+                     "Lo que el fondo rinde sobre la curva AAA antes de gastos: la prima de "
+                     "crédito. Es una constante: en realidad se mueve con el ciclo (se amplía "
+                     "en las crisis).");
+            numField("Gastos RF (%)", &p.realTer, 0.05, "%.2f",
+                     "Gastos corrientes del fondo. Solo se restan en la prima: el valor "
+                     "liquidativo ya los lleva descontados.");
+            p.realTer = std::clamp(p.realTer, 0.0, 3.0);
+            const FundFit& f = a.fit;
+            if (f.valid) {
+                ImGui::TextColored(C_DIM,
+                                   "Su histórico: se mueve como un bono AAA a %s años (R² %s) y "
+                                   "le saca %s pp al año después de gastos (%s pp en los últimos "
+                                   "3 años).",
+                                   fmtNum(f.duration, 2).c_str(), fmtNum(f.r2, 2).c_str(),
+                                   fmtSigned(f.excess, 2).c_str(),
+                                   fmtSigned(f.excess3y, 2).c_str());
+                if (ImGui::Button("Ajustar al histórico del fondo", ImVec2(-1, 0))) {
+                    p.realDuration = f.duration;
+                    p.realSpread = std::round((f.excess + p.realTer) * 100.0) / 100.0;
+                }
+                Tooltip("Duración = la sensibilidad semanal del valor liquidativo a la curva "
+                        "AAA; diferencial = lo que le ha ganado a ese bono AAA en todo su "
+                        "histórico, más los gastos. Usar todo el histórico para fijar un "
+                        "parámetro del backtest mira al futuro: tómalo como una descripción "
+                        "del fondo, no como algo que se supiera en 2012.");
+            }
+        } else {
+            numField("Duración (años)", &p.duration, 0.25, "%.2f",
+                     "Duración del fondo de renta fija. Se simula como un bono cupón cero de "
+                     "ese plazo renovado cada día sobre la curva AAA: cupón, descenso por la "
+                     "curva y variación de precio. Pon aquí la duración modificada de tu fondo.");
+            p.duration = std::clamp(p.duration, 0.5, 5.0);
+            numField("Diferencial (pp)", &p.fundSpread, 0.05, "%.2f",
+                     "Rentabilidad adicional del fondo sobre la curva AAA: crédito, periferia. "
+                     "TIR de la cartera del fondo menos el tipo AAA al mismo plazo.");
+            numField("Gastos RF (%)", &p.fundTer, 0.05, "%.2f");
+            p.fundTer = std::clamp(p.fundTer, 0.0, 3.0);
+        }
+        ImGui::PopTextWrapPos();
         numField("Gastos monetario (%)", &p.mmTer, 0.05, "%.2f");
-        p.fundTer = std::clamp(p.fundTer, 0.0, 3.0);
         p.mmTer = std::clamp(p.mmTer, 0.0, 3.0);
     }
 
@@ -259,7 +320,9 @@ void paramsPanel(App& a, int focus) {  // focus: 0 signal, 1 strategy, 2 thresho
 
     ImGui::Spacing();
     if (ImGui::Button("Restablecer valores del método", ImVec2(-1, 0))) {
+        int source = p.fundSource;  // the choice of fund is not a threshold
         p = Params();
+        p.fundSource = source;
         setStatus(a, "Parámetros devueltos a los de explicacion.md");
     }
     ImGui::EndChild();
@@ -268,8 +331,126 @@ void paramsPanel(App& a, int focus) {  // focus: 0 signal, 1 strategy, 2 thresho
 
 std::string periodLabel(const App& a) {
     size_t first, last;
-    if (!periodRange(a.mk, a.p, first, last)) return "periodo vacío";
+    if (!periodRange(a.mk, a.ix, a.p, first, last)) return "periodo vacío";
     return dateStr(a.mk.days[first]) + " a " + dateStr(a.mk.days[last]);
+}
+
+// % change of a NAV series over the last `days` calendar days
+double navChange(const Series& nav, int days) {
+    if (nav.empty()) return kNaN;
+    double then = nav.asOf(nav.lastDay() - days);
+    return std::isfinite(then) && then > 0 ? (nav.vals.back() / then - 1.0) * 100.0 : kNaN;
+}
+
+// "+1,23 pp · 68 %" for one bucket of the signal study
+std::string bucketCell(const Bucket& b) {
+    return b.n ? fmtSigned(b.mean, 2) + " pp · " + fmtNum(b.pctPos, 0) + " %" : "-";
+}
+
+// The real fund at a glance: what it is, its NAV, how it has done lately and
+// what it is estimated to yield against the money market.
+void fundPanel(App& a, const Indicators& in, ImVec2 size) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, C_PANEL);
+    ImGui::BeginChild("fund", size, ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
+    ImGui::PushTextWrapPos(0);
+    if (!a.ix.real) {
+        ImGui::TextColored(C_DIM, "FONDO DE RENTA FIJA");
+        ImGui::Text("Bono AAA sintético a %s años", fmtNum(a.eff.duration, 2).c_str());
+        if (a.p.fundSource == 1 && !a.fundIsin.empty())
+            ImGui::TextColored(C_ORANGE,
+                               "Faltan los valores liquidativos de %s: pulsa «Actualizar "
+                               "datos» para bajarlos de Finect.",
+                               a.fundIsin.c_str());
+        else
+            ImGui::TextColored(C_DIM, "El backtest usa el fondo sintético. En los parámetros "
+                                      "de Señal o Estrategia se elige el fondo real.");
+    } else {
+        const Series& nav = a.fundNav;
+        ImGui::TextColored(C_DIM, "FONDO · %s · VL A %s", a.fundIsin.c_str(),
+                           dateStr(nav.lastDay()).c_str());
+        ImGui::TextUnformatted(fundLabel(a).c_str());
+        ImGui::PushFont(fBig);
+        ImGui::TextColored(C_TEXT, "%s €", fmtNum(nav.vals.back(), 3).c_str());
+        ImGui::PopFont();
+        static const std::pair<const char*, int> spans[] = {
+            {"1 m", 30}, {"3 m", 91}, {"1 a", 365}, {"3 a", 1096}};
+        ImGui::PushTextWrapPos(-1.0f);  // one row, never wrapped
+        for (size_t k = 0; k < 4; k++) {
+            ImGui::SameLine(0, k ? 14 : 18);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4);
+            double v = navChange(nav, spans[k].second);
+            ImGui::TextColored(C_DIM, "%s", spans[k].first);
+            ImGui::SameLine(0, 5);
+            ImGui::TextColored(std::isfinite(v) ? signColor(v) : C_DIM, "%s",
+                               (fmtSigned(v, 1) + " %").c_str());
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::TextColored(C_DIM, "Rinde (est.)");
+        ImGui::SameLine();
+        ImGui::Text("%s neto; el monetario, %s", fmtPct(in.fundYield).c_str(),
+                    fmtPct(in.mmExpected).c_str());
+        ImGui::SameLine();
+        HelpMarker("Tipo AAA al plazo de la duración del fondo más su diferencial, menos "
+                   "gastos (panel «Fondo de renta fija» de Señal o Estrategia). Es una "
+                   "estimación: Finect no publica la TIR de la cartera.");
+        int age = (int)(time(nullptr) / 86400) - nav.lastDay();
+        if (age > 6)
+            ImGui::TextColored(C_ORANGE, "El último VL es de hace %d días.", age);
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
+// What happened after earlier reviews like today's: the empirical side of the
+// verdict, read off the signal study.
+void outlookPanel(App& a, const Indicators& in, Decision dec, ImVec2 size) {
+    const SignalStudy& st = a.study;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, C_PANEL);
+    ImGui::BeginChild("outlook", size, ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
+    ImGui::TextColored(C_DIM, "SI ENTRAS HOY: QUÉ PASÓ OTRAS VECES");
+    ImGui::SameLine();
+    std::string help =
+        "Exceso medio de " + std::string(a.ix.real ? "el fondo" : "la renta fija") +
+        " sobre el monetario en las revisiones del backtest (" + periodLabel(a) +
+        ") que tenían la misma puntuación o la misma decisión que hoy, y el porcentaje de "
+        "ellas en que la renta fija ganó. Es lo que dicen los datos pasados, no una "
+        "previsión: las ventanas se solapan y hay pocos ciclos de tipos.";
+    HelpMarker(help.c_str());
+    if (ImGui::BeginTable("outlookT", 4, kTable)) {
+        ImGui::TableSetupColumn("", 0, 1.6f);
+        for (int h = 0; h < kHorizons; h++) {
+            char lab[24];
+            snprintf(lab, sizeof lab, "a %d meses", kHorizonMonths[h]);
+            ImGui::TableSetupColumn(lab);
+        }
+        ImGui::TableHeadersRow();
+        auto row = [&](const std::string& label, const ImVec4& col, const Bucket* b) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextColored(col, "%s", label.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(C_DIM, "(%d)", b[1].n);
+            for (int h = 0; h < kHorizons; h++) {
+                ImGui::TableNextColumn();
+                if (!b[h].n) {
+                    TextRight("-", C_DIM);
+                    continue;
+                }
+                tintCell(b[h].mean, 3.0);
+                TextRight(bucketCell(b[h]), signColor(b[h].mean));
+            }
+        };
+        if (in.valid) {
+            row("Puntuación " + std::to_string(in.score), scoreColor(in.score, a.p),
+                st.byScore[in.score]);
+            row(decisionName(dec), decisionColor(dec), st.byDecision[(int)dec]);
+        }
+        row("Cualquier revisión", C_TEXT, st.all);
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 }
 
 }  // namespace
@@ -307,7 +488,7 @@ void tabMonitor(App& a) {
     else
     ImGui::TextColored(C_DIM, "%s",
                        dec == Decision::Full
-                           ? "La mayoría de las señales favorecen la renta fija a 2 años."
+                           ? "La mayoría de las señales favorecen pasar a la renta fija."
                            : dec == Decision::Partial
                                  ? "Señales mixtas: cabe una entrada escalonada, sin "
                                    "comprometer todo el capital."
@@ -334,8 +515,10 @@ void tabMonitor(App& a) {
         StatTile("Pendiente", fmtBp(in.slope), signColor(in.slope), nullptr, w);
         ImGui::SameLine();
         StatTile("Prima", fmtSigned(in.premium, 2) + " pp", signColor(in.premium),
-                 "Rendimiento neto del fondo de renta fija menos el esperado del monetario a "
-                 "12 meses.", w);
+                 a.ix.real ? "Rendimiento neto estimado del fondo menos el esperado del "
+                             "monetario a 12 meses."
+                           : "Rendimiento neto del fondo de renta fija menos el esperado del "
+                             "monetario a 12 meses.", w);
 
         ImGui::Spacing();
         ImGui::TextColored(C_DIM, "Control semanal:");
@@ -376,7 +559,7 @@ void tabMonitor(App& a) {
     ImGui::EndChild();
 
     // the five cards
-    float cardH = 248;
+    float cardH = 256;
     float cw = (ImGui::GetContentRegionAvail().x - 4 * ImGui::GetStyle().ItemSpacing.x) / 5;
     for (int k = 0; k < 5; k++) {
         if (k) ImGui::SameLine();
@@ -406,6 +589,15 @@ void tabMonitor(App& a) {
         ImGui::PopID();
     }
 
+    // the fund and the empirical outlook
+    {
+        float h = 162;
+        float wl = std::max(380.0f, ImGui::GetContentRegionAvail().x * 0.40f);
+        fundPanel(a, in, ImVec2(wl, h));
+        ImGui::SameLine();
+        outlookPanel(a, in, dec, ImVec2(0, h));
+    }
+
     // how the score got here
     sectionTitle("Puntuación de los últimos 5 años",
                  "La puntuación diaria con los umbrales actuales. Las líneas discontinuas son "
@@ -427,6 +619,7 @@ void tabHistory(App& a) {
     rangeButtons(&a.histRange);
 
     size_t from = rangeStart(a, a.histRange);
+    size_t scoreFrom = from;
     const Market& mk = a.mk;
     const auto& ind = a.ind;
     const Params& p = a.p;
@@ -478,17 +671,33 @@ void tabHistory(App& a) {
             o.lines.push_back({p.t2yUnf, C_RED, "2 años desfavorable"});
             break;
         default: {
-            double b0 = a.ix.bond[from], m0 = a.ix.mm[from];
-            s.push_back(daily(a, from, "Monetario", C_GRAY,
+            // the real fund only exists from its first NAV on
+            size_t f0 = std::max(from, a.ix.real ? a.ix.first : 0);
+            scoreFrom = f0;
+            size_t f1 = a.ix.real ? a.ix.last : mk.size() - 1;
+            double b0 = a.ix.bond[f0], m0 = a.ix.mm[f0], s0 = a.ix.synth[f0];
+            auto upTo = [&](size_t i, double v) { return i <= f1 ? v : kNaN; };
+            s.push_back(daily(a, f0, "Monetario", C_GRAY,
                               [&](size_t i) { return a.ix.mm[i] / m0 * 100.0; }));
-            s.push_back(daily(a, from, "Renta fija (duración modelada)", C_BLUE,
-                              [&](size_t i) { return a.ix.bond[i] / b0 * 100.0; }));
+            if (a.ix.real) {
+                std::string lab = "Bono AAA a " + fmtNum(a.eff.realDuration, 2) + " años + " +
+                                  fmtNum(a.eff.realSpread, 2) + " pp − gastos";
+                s.push_back(daily(a, f0, lab.c_str(), C_PURPLE,
+                                  [&](size_t i) { return a.ix.synth[i] / s0 * 100.0; }));
+                s.back().thickness = 1.5f;
+                s.push_back(daily(a, f0, a.fundIsin.c_str(), C_BLUE, [&](size_t i) {
+                    return upTo(i, a.ix.bond[i] / b0 * 100.0);
+                }));
+            } else {
+                s.push_back(daily(a, f0, "Renta fija (duración modelada)", C_BLUE,
+                                  [&](size_t i) { return a.ix.bond[i] / b0 * 100.0; }));
+            }
             break;
         }
     }
     float h = ImGui::GetContentRegionAvail().y;
     drawChart("histTop", ImVec2(0, h * 0.62f), s, o);
-    drawChart("histScore", ImVec2(0, 0), {scoreSeries(a, from)}, scoreOpts(a));
+    drawChart("histScore", ImVec2(0, 0), {scoreSeries(a, scoreFrom)}, scoreOpts(a));
 }
 
 // ---- 3. Señal ---------------------------------------------------------------
@@ -508,7 +717,9 @@ void tabSignal(App& a) {
         ImGui::RadioButton(lab, &a.horizon, i);
     }
     ImGui::SameLine(0, 30);
-    ImGui::TextColored(C_DIM, "%s · %zu revisiones", periodLabel(a).c_str(), st.obs.size());
+    ImGui::TextColored(C_DIM, "%s · %s · %zu revisiones",
+                       a.ix.real ? a.fundIsin.c_str() : fundLabel(a).c_str(),
+                       periodLabel(a).c_str(), st.obs.size());
     ImGui::SameLine();
     HelpMarker("En cada revisión se anota la puntuación y lo que hizo después el fondo de "
                "renta fija menos el monetario (exceso, en puntos porcentuales). Las ventanas "
@@ -661,14 +872,25 @@ void tabStrategy(App& a) {
         return;
     }
 
-    ImGui::TextColored(C_DIM, "%s · %s años · revisión %s", periodLabel(a).c_str(),
-                       fmtNum(sig.years, 1).c_str(), a.p.freq ? "semanal" : "mensual");
+    ImGui::TextColored(C_DIM, "%s · %s · %s años · revisión %s",
+                       a.ix.real ? a.fundIsin.c_str() : fundLabel(a).c_str(),
+                       periodLabel(a).c_str(), fmtNum(sig.years, 1).c_str(),
+                       a.p.freq ? "semanal" : "mensual");
     ImGui::SameLine();
-    HelpMarker("La cartera empieza en el monetario. En cada revisión se mira la puntuación y "
-               "se aplica la regla de decisión; la orden se ejecuta al día siguiente, porque "
-               "el BCE publica cada curva la mañana posterior. Los dos fondos son sintéticos: "
-               "el monetario capitaliza el €STR (EONIA − 8,5 pb antes de octubre de 2019) y "
-               "la renta fija es un bono AAA de la duración indicada, ambos netos de gastos.");
+    HelpMarker(a.ix.real
+                   ? "La cartera empieza en el monetario. En cada revisión se mira la "
+                     "puntuación y se aplica la regla de decisión; la orden se ejecuta al día "
+                     "siguiente, al valor liquidativo de ese día, porque el BCE publica cada "
+                     "curva la mañana posterior. La renta fija es el fondo real con su valor "
+                     "liquidativo (ya neto de gastos); el monetario es sintético: el €STR "
+                     "capitalizado (EONIA − 8,5 pb antes de octubre de 2019) menos gastos. Un "
+                     "traspaso real tarda dos o tres días hábiles más."
+                   : "La cartera empieza en el monetario. En cada revisión se mira la "
+                     "puntuación y se aplica la regla de decisión; la orden se ejecuta al día "
+                     "siguiente, porque el BCE publica cada curva la mañana posterior. Los dos "
+                     "fondos son sintéticos: el monetario capitaliza el €STR (EONIA − 8,5 pb "
+                     "antes de octubre de 2019) y la renta fija es un bono AAA de la duración "
+                     "indicada, ambos netos de gastos.");
     {
         float w = (ImGui::GetContentRegionAvail().x - 5 * ImGui::GetStyle().ItemSpacing.x) / 6;
         StatTile("TAE de la señal", fmtPct(sig.cagr), C_TEXT, nullptr, w);
@@ -885,14 +1107,16 @@ void tabThresholds(App& a) {
 // ---- 6. Datos ---------------------------------------------------------------
 
 void tabData(App& a) {
-    sectionTitle("Series del BCE",
-                 "Todo sale del portal de datos del BCE (data-api.ecb.europa.eu): la curva de "
-                 "deuda pública AAA de la zona euro, que se publica cada día hábil desde "
-                 "septiembre de 2004, el €STR y, para los años anteriores a este, el EONIA.");
+    sectionTitle("Series",
+                 "Los tipos salen del portal de datos del BCE (data-api.ecb.europa.eu): la "
+                 "curva de deuda pública AAA de la zona euro, que se publica cada día hábil "
+                 "desde septiembre de 2004, el €STR y, para los años anteriores a este, el "
+                 "EONIA. Los valores liquidativos del fondo real, de Finect "
+                 "(api.finect.com), el mismo servicio que usan msmoney y fondos-openbank.");
     ImGui::SameLine(0, 30);
     ImGui::BeginDisabled(a.updater.busy());
     if (ImGui::Button("Descargar todo de nuevo")) startRefresh(a, true);
-    Tooltip("Ignora la caché y vuelve a pedir el histórico completo de las once series.");
+    Tooltip("Ignora la caché y vuelve a pedir el histórico completo de todas las series.");
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(a.mk.empty());
@@ -911,7 +1135,7 @@ void tabData(App& a) {
 
     if (ImGui::BeginTable("series", 6, kTable)) {
         ImGui::TableSetupColumn("Serie", 0, 1.6f);
-        ImGui::TableSetupColumn("Clave en el BCE", 0, 2.6f);
+        ImGui::TableSetupColumn("Origen", 0, 2.6f);
         ImGui::TableSetupColumn("Desde");
         ImGui::TableSetupColumn("Hasta");
         ImGui::TableSetupColumn("Días");
@@ -938,6 +1162,28 @@ void tabData(App& a) {
             else if (!o->error.empty()) ImGui::TextColored(C_RED, "%s", o->error.c_str());
             else if (o->added) ImGui::TextColored(C_GREEN, "%d días nuevos", o->added);
             else ImGui::TextColored(C_DIM, si.live ? "sin novedades" : "serie cerrada");
+        }
+        if (!a.fundIsin.empty()) {
+            const Series& s = a.fundNav;
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Text("VL %s", a.fundIsin.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextColored(C_DIM, "Finect · %s",
+                               a.fundName.empty() ? "fondo real" : a.fundName.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(dateStr(s.firstDay()).c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(dateStr(s.lastDay()).c_str());
+            cellRight(std::to_string(s.days.size()));
+            ImGui::TableNextColumn();
+            const UpdateOutcome* o = nullptr;
+            for (auto& u : a.lastUpdate)
+                if (u.id == kFundOutcome) o = &u;
+            if (!o) ImGui::TextColored(C_DIM, s.empty() ? "sin datos" : "en caché");
+            else if (!o->error.empty()) ImGui::TextColored(C_RED, "%s", o->error.c_str());
+            else if (o->added) ImGui::TextColored(C_GREEN, "%d días nuevos", o->added);
+            else ImGui::TextColored(C_DIM, "sin novedades");
         }
         ImGui::EndTable();
     }

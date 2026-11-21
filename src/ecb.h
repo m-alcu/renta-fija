@@ -17,3 +17,7 @@ bool ecbParseCsv(const std::string& body, Series& out);
 // Fetches one series from `fromDay` on (kNoDay: the whole history). An empty
 // answer is a success with no observations: nothing published in that range.
 bool ecbFetch(int seriesId, int fromDay, Series& out, std::string* error);
+
+// Runs a shell command and returns what it wrote on stdout (shared with the
+// Finect client). Arguments must already be safe inside single quotes.
+std::string runCommand(std::string cmd);

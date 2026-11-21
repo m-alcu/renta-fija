@@ -21,8 +21,9 @@ struct Field {
 const Field kFields[] = {
     F('d', t2yFav),     F('d', t2yUnf),      F('b', confirm1m),  F('d', t2yConfirm),
     F('d', slopeThr),   F('d', expFav),      F('d', expUnf),     F('d', premFav),
-    F('d', premUnf),    F('d', t10Fav),      F('d', t10Unf),     F('d', duration),
-    F('d', fundSpread), F('d', fundTer),     F('d', mmTer),      F('i', fullScore),
+    F('d', premUnf),    F('d', t10Fav),      F('d', t10Unf),     F('i', fundSource),
+    F('d', duration),   F('d', fundSpread),  F('d', fundTer),    F('d', realDuration),
+    F('d', realSpread), F('d', realTer),     F('d', mmTer),      F('i', fullScore),
     F('i', partialScore), F('i', exitScore), F('d', partialPct), F('d', premEntry), F('i', freq),
     F('d', switchCostBp), F('i', startYear), F('i', endYear),
 };
@@ -50,7 +51,9 @@ void fieldSet(Params& p, const Field& f, const std::string& v) {
 
 // keeps a hand-edited file from putting the engine somewhere meaningless
 void sanitize(Params& p) {
+    p.fundSource = std::clamp(p.fundSource, 0, 1);
     p.duration = std::clamp(p.duration, 0.5, 5.0);
+    p.realDuration = std::clamp(p.realDuration, 0.5, 10.0);
     p.fullScore = std::clamp(p.fullScore, 1, 10);
     p.partialScore = std::clamp(p.partialScore, 1, p.fullScore);
     p.exitScore = std::clamp(p.exitScore, 0, 9);
@@ -125,12 +128,12 @@ Indicators computeIndicators(const Market& mk, size_t i, const Params& p) {
     // 4. What the fund yields against what the money market is expected to
     // pay over the next year: today's overnight rate plus the move the curve
     // prices in between 3 and 12 months.
-    in.fundYield = mk.spot(i, p.duration) + p.fundSpread - p.fundTer;
+    in.fundYield = mk.spot(i, p.fundDur()) + p.fundSpr() - p.fundCost();
     in.mmExpected = in.on + (in.y1y - in.y3m) - p.mmTer;
     in.premium = in.fundYield - in.mmExpected;
     // A rise spread evenly over the year costs duration x rise in price and
     // gives back about half of it in extra carry.
-    in.breakevenBp = in.premium * 100.0 / std::max(0.25, p.duration - 0.5);
+    in.breakevenBp = in.premium * 100.0 / std::max(0.25, p.fundDur() - 0.5);
 
     int i1 = mk.indexAsOf(day - 30), i3 = mk.indexAsOf(day - 91), iw = mk.indexAsOf(day - 7);
     if (i3 < 0) return in;  // not enough history for the trends yet
@@ -268,51 +271,137 @@ std::string indicatorReading(const Indicators& in, int k) {
 }
 
 // ---- indices ----------------------------------------------------------------
-Indices buildIndices(const Market& mk, const Params& p) {
+namespace {
+
+// buy a zero of maturity M on row i, sell it on row i + 1 as a zero of
+// maturity M - dt at that day's curve
+double zeroRatio(const Market& mk, size_t i, double M) {
+    double dt = (mk.days[i + 1] - mk.days[i]) / 365.25;
+    double y0 = mk.spot(i, M) / 100.0;
+    double y1 = mk.spot(i + 1, std::max(M - dt, 0.0)) / 100.0;
+    return std::exp(-y1 * (M - dt) + y0 * M);
+}
+
+}  // namespace
+
+Indices buildIndices(const Market& mk, const Params& p, const Series* nav) {
     Indices ix;
     size_t n = mk.size();
     ix.mm.assign(n, 100.0);
-    ix.bond.assign(n, 100.0);
-    double M = p.duration;
+    ix.synth.assign(n, 100.0);
+    ix.last = n ? n - 1 : 0;
+    double M = p.fundDur(), carry = p.fundSpr() - p.fundCost();
     for (size_t i = 0; i + 1 < n; i++) {
         double dd = mk.days[i + 1] - mk.days[i];
         ix.mm[i + 1] = ix.mm[i] * (1.0 + (mk.on[i] - p.mmTer) / 100.0 * dd / 360.0);
-
-        // buy a zero of maturity M today, sell it tomorrow as a zero of
-        // maturity M - dt at tomorrow's curve
-        double dt = dd / 365.25;
-        double y0 = mk.spot(i, M) / 100.0;
-        double y1 = mk.spot(i + 1, std::max(M - dt, 0.0)) / 100.0;
-        double ratio = std::exp(-y1 * (M - dt) + y0 * M);
-        ratio *= std::exp((p.fundSpread - p.fundTer) / 100.0 * dt);
-        ix.bond[i + 1] = ix.bond[i] * ratio;
+        ix.synth[i + 1] =
+            ix.synth[i] * zeroRatio(mk, i, M) * std::exp(carry / 100.0 * dd / 365.25);
     }
+    ix.bond = ix.synth;
+    if (p.fundSource != 1 || !nav || nav->empty() || !n) return ix;
+
+    // the NAV over the market days it covers; a day the fund does not publish
+    // (an Irish holiday, say) keeps the previous one
+    auto it = std::lower_bound(mk.days.begin(), mk.days.end(), nav->firstDay());
+    int lastIdx = mk.indexAsOf(nav->lastDay());
+    if (it == mk.days.end() || lastIdx < 0) return ix;
+    size_t first = (size_t)(it - mk.days.begin()), last = (size_t)lastIdx;
+    if (last <= first) return ix;
+    double base = nav->asOf(mk.days[first]);
+    for (size_t i = 0; i < n; i++)
+        ix.bond[i] = i < first ? 100.0 : 100.0 * nav->asOf(mk.days[i]) / base;
+    ix.first = first;
+    ix.last = last;
+    ix.real = true;
     return ix;
 }
 
+FundFit fitFund(const Market& mk, const Series& nav) {
+    FundFit f;
+    if (mk.size() < 3 || nav.empty()) return f;
+    auto it = std::lower_bound(mk.days.begin(), mk.days.end(), nav.firstDay());
+    int lastIdx = mk.indexAsOf(nav.lastDay());
+    if (it == mk.days.end() || lastIdx < 0) return f;
+    size_t first = (size_t)(it - mk.days.begin()), last = (size_t)lastIdx;
+    if (last < first + 60) return f;  // a quarter of NAVs at least
+
+    // weekly samples: a daily NAV and the curve are not struck at the same
+    // hour, and that noise washes out over five days
+    std::vector<size_t> wk;
+    for (size_t i = first; i <= last; i += 5) wk.push_back(i);
+    std::vector<double> r;
+    for (size_t k = 1; k < wk.size(); k++)
+        r.push_back(std::log(nav.asOf(mk.days[wk[k]]) / nav.asOf(mk.days[wk[k - 1]])) * 100.0);
+    double rMean = 0;
+    for (double v : r) rMean += v;
+    rMean /= (double)r.size();
+
+    double bestGap = 1e18;
+    for (double M = 0.5; M <= 10.0 + 1e-9; M += 0.25) {
+        std::vector<double> x;
+        for (size_t k = 1; k < wk.size(); k++)
+            x.push_back(-(mk.spot(wk[k], M) - mk.spot(wk[k - 1], M)));
+        double xMean = 0;
+        for (double v : x) xMean += v;
+        xMean /= (double)x.size();
+        double sxy = 0, sxx = 0, syy = 0;
+        for (size_t k = 0; k < x.size(); k++) {
+            sxy += (x[k] - xMean) * (r[k] - rMean);
+            sxx += (x[k] - xMean) * (x[k] - xMean);
+            syy += (r[k] - rMean) * (r[k] - rMean);
+        }
+        if (sxx <= 0 || syy <= 0) continue;
+        double beta = sxy / sxx;
+        if (std::fabs(beta - M) < bestGap) {
+            bestGap = std::fabs(beta - M);
+            f.duration = M;
+            f.r2 = sxy * sxy / (sxx * syy);
+        }
+    }
+    if (bestGap > 1e17) return f;
+
+    auto excessOver = [&](size_t a, double* fundCagr, double* zeroCagr) {
+        double zero = 1.0;
+        for (size_t i = a; i < last; i++) zero *= zeroRatio(mk, i, f.duration);
+        double years = (mk.days[last] - mk.days[a]) / 365.25;
+        double fund = nav.asOf(mk.days[last]) / nav.asOf(mk.days[a]);
+        if (fundCagr) *fundCagr = (std::pow(fund, 1.0 / years) - 1.0) * 100.0;
+        if (zeroCagr) *zeroCagr = (std::pow(zero, 1.0 / years) - 1.0) * 100.0;
+        return (std::pow(fund / zero, 1.0 / years) - 1.0) * 100.0;
+    };
+    f.excess = excessOver(first, &f.fundCagr, &f.zeroCagr);
+    int a3 = mk.indexAsOf(mk.days[last] - (int)(3 * 365.25));
+    f.excess3y = excessOver(std::max(first, (size_t)std::max(a3, 0)), nullptr, nullptr);
+    f.from = mk.days[first];
+    f.to = mk.days[last];
+    f.valid = true;
+    return f;
+}
+
 // ---- review calendar --------------------------------------------------------
-bool periodRange(const Market& mk, const Params& p, size_t& first, size_t& last) {
+bool periodRange(const Market& mk, const Indices& ix, const Params& p, size_t& first,
+                 size_t& last) {
     if (mk.empty()) return false;
-    first = 0;
-    last = mk.size() - 1;
+    first = std::min(ix.first, mk.size() - 1);
+    last = std::min(ix.last, mk.size() - 1);
     if (p.startYear > 0) {
         int from = serialFromDate(Date{p.startYear, 1, 1});
         auto it = std::lower_bound(mk.days.begin(), mk.days.end(), from);
         if (it == mk.days.end()) return false;
-        first = (size_t)(it - mk.days.begin());
+        first = std::max(first, (size_t)(it - mk.days.begin()));
     }
     if (p.endYear > 0) {
         int idx = mk.indexAsOf(serialFromDate(Date{p.endYear, 12, 31}));
         if (idx < 0) return false;
-        last = (size_t)idx;
+        last = std::min(last, (size_t)idx);
     }
     return last > first;
 }
 
-std::vector<size_t> reviewDays(const Market& mk, const Params& p) {
+std::vector<size_t> reviewDays(const Market& mk, const Indices& ix, const Params& p) {
     std::vector<size_t> out;
     size_t first, last;
-    if (!periodRange(mk, p, first, last)) return out;
+    if (!periodRange(mk, ix, p, first, last)) return out;
     auto bucket = [&](int serial) {
         // weeks start on Monday; 1970-01-01 was a Thursday
         return p.freq == 1 ? (serial + 3 >= 0 ? (serial + 3) / 7 : -1) : monthOrdinalOf(serial);
@@ -347,7 +436,8 @@ Bucket bucketOf(std::vector<double> v) {
 SignalStudy studySignal(const Market& mk, const Indices& ix, const std::vector<Indicators>& ind,
                         const Params& p) {
     SignalStudy st{};
-    for (size_t i : reviewDays(mk, p)) {
+    int end = mk.empty() ? kNoDay : mk.days[std::min(ix.last, mk.size() - 1)];
+    for (size_t i : reviewDays(mk, ix, p)) {
         if (!ind[i].valid) continue;
         Obs o;
         o.idx = i;
@@ -355,7 +445,7 @@ SignalStudy studySignal(const Market& mk, const Indices& ix, const std::vector<I
         for (int h = 0; h < kHorizons; h++) {
             int target = o.day + (int)std::lround(kHorizonMonths[h] * 30.4375);
             o.bond[h] = o.mm[h] = o.excess[h] = kNaN;
-            if (target > mk.days.back()) continue;
+            if (target > end) continue;
             size_t j = (size_t)mk.indexAsOf(target);
             o.bond[h] = (ix.bond[j] / ix.bond[i] - 1.0) * 100.0;
             o.mm[h] = (ix.mm[j] / ix.mm[i] - 1.0) * 100.0;
@@ -407,16 +497,16 @@ StratResult simulate(const Market& mk, const Indices& ix, const std::vector<Indi
     switch (s) {
         case Strategy::Signal: r.name = "Señal de 5 indicadores"; break;
         case Strategy::AllMM: r.name = "Siempre monetario"; break;
-        case Strategy::AllBond: r.name = "Siempre renta fija"; break;
+        case Strategy::AllBond: r.name = ix.real ? "Siempre en el fondo" : "Siempre renta fija"; break;
         default: r.name = "50 % / 50 %"; break;
     }
     if (trades) trades->clear();
     size_t first, last;
-    if (!periodRange(mk, p, first, last)) return r;
+    if (!periodRange(mk, ix, p, first, last)) return r;
 
     std::vector<char> review(mk.size(), 0);
     if (s == Strategy::Signal)
-        for (size_t i : reviewDays(mk, p)) review[i] = 1;
+        for (size_t i : reviewDays(mk, ix, p)) review[i] = 1;
 
     double w = s == Strategy::AllBond ? 1.0 : s == Strategy::Half ? 0.5 : 0.0;
     double pending = w;
